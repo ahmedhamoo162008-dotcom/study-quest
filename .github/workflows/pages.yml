@@ -24,6 +24,9 @@ jobs:
           base64 -d site.b64 | tar xz -C site
           npm install --no-save pyodide@314.0.8 @electric-sql/pglite@0.6.0
           node vendor.js
+          mkdir -p site/pdf
+          for f in pdfdata/pdfdata/pdfs.part*; do cat $f; echo; done | base64 -d | tar x -C site/pdf --strip-components=1
+          ls site/pdf | wc -l
           du -sh site
       - uses: actions/upload-pages-artifact@v3
         with:
