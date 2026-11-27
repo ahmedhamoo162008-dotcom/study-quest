@@ -22,6 +22,22 @@ jobs:
         run: |
           mkdir site
           base64 -d site.b64 | tar xz -C site
+          cp challenges.js site/challenges.js
+          python3 - <<'PY'
+          a=open('site/app.js').read()
+          if 'CHALLENGES' not in a:
+              k="h('div', { class: 'row' },\n        h('button', { class: 'btn ghost', onclick: () => (location.hash = '#/review') }"
+              assert k in a
+              a=a.replace(k,"window.CHALLENGES.card(),\n      "+k,1)
+              k2="else if (a === 'lens') await lens();"
+              assert k2 in a
+              a=a.replace(k2,k2+" else if (a === 'challenges') window.CHALLENGES.route(b);",1)
+              open('site/app.js','w').write(a)
+          i=open('site/index.html').read()
+          if 'challenges.js' not in i:
+              i=i.replace('<script src="app.js">','<script src="challenges.js"></script>\n<script src="app.js">',1)
+              open('site/index.html','w').write(i)
+          PY
           npm install --no-save pyodide@314.0.8 @electric-sql/pglite@0.6.0
           node vendor.js
           mkdir -p site/pdf
