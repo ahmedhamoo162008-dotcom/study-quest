@@ -26,6 +26,7 @@ jobs:
           node vendor.js
           mkdir -p site/pdf
           for f in pdfdata/pdfdata/pdfs.part*; do cat $f; echo; done | base64 -d | tar x -C site/pdf --strip-components=1
+          for f in pdfdata2/pdfdata2/pdfs2.part*; do cat $f; echo; done | base64 -d | tar x -C site/pdf --strip-components=1
           ls site/pdf | wc -l
           du -sh site
       - uses: actions/upload-pages-artifact@v3
