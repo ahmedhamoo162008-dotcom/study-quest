@@ -139,11 +139,489 @@
       h('div', { class: 'card world', style: '--c:#336791', onclick: () => (location.hash = '#/challenges/detective') },
         h('div', { class: 'icon' }, '🕵️'),
         h('div', null, h('h3', null, 'PostgreSQL · قضية سرقة محل النور'), h('div', { class: 'muted' }, '60 مشتبه، شهود، ورديات، وقت الجريمة. استبعد لحد ما يفضل المجرم.'), h('div', { class: 'muted' }, st.solved ? 'اتحلت ' + stars(st.stars || 1) : 'لسه ما اتحلتش'))),
-      h('div', { class: 'card world', style: '--c:#555;opacity:.6' }, h('div', { class: 'icon' }, '🔒'), h('div', null, h('h3', null, 'تحديات الأعوام التانية'), h('div', { class: 'muted' }, 'Python / Excel / Node: جاية قريب'))),
+      h('div', { class: 'card world', style: '--c:#3572A5', onclick: () => (location.hash = '#/challenges/cipher') },
+        h('div', { class: 'icon' }, '🔐'),
+        h('div', null, h('h3', null, 'Python · فك الشفرة: الخلية النائمة'), h('div', { class: 'muted' }, '6 رسايل مشفرة بين خلية نائمة. اكتب الكود اللي يفكها رسالة رسالة لحد كلمة سر المخبأ.'), h('div', { class: 'muted' }, caseProgressText(CIPHER_CFG)))),
+      h('div', { class: 'card world', style: '--c:#7d3c98', onclick: () => (location.hash = '#/challenges/warroom') },
+        h('div', { class: 'icon' }, '🎖️'),
+        h('div', null, h('h3', null, 'Python · غرفة العمليات: الحرب السرية'), h('div', { class: 'muted' }, 'إنت ضابط الشفرة في حزب سري. فك رسايل العدو وارمّز تقاريرك قبل الهجوم.'), h('div', { class: 'muted' }, caseProgressText(WAR_CFG)))),
+      h('div', { class: 'card world', style: '--c:#555;opacity:.6' }, h('div', { class: 'icon' }, '🔒'), h('div', null, h('h3', null, 'تحديات تانية'), h('div', { class: 'muted' }, 'Excel / Node: جاية قريب'))),
     ];
   }
+  // ================= Python big cases engine (cipher + war room) =================
+  const caseLoad = (key) => { try { return JSON.parse(localStorage.getItem(key)) || {}; } catch { return {}; } };
+  const caseSave = (key, o) => localStorage.setItem(key, JSON.stringify({ ...caseLoad(key), ...o }));
+
+  // Python runner over the app's py-worker.js (Pyodide), same message protocol as the main runner
+  let pworker = null, pready = null, pseq = 0, pchain = Promise.resolve();
+  function pspawn() {
+    pworker = new Worker('py-worker.js', { type: 'module' });
+    pready = new Promise((res) => {
+      const f = (e) => { if (e.data && e.data.ready) { pworker.removeEventListener('message', f); res(); } };
+      pworker.addEventListener('message', f); pworker.addEventListener('error', () => res());
+    });
+  }
+  function runPy(code, kind, items) {
+    const p = pchain.then(async () => {
+      if (!pworker) pspawn(); await pready;
+      return new Promise((resolve) => {
+        const id = ++pseq, w = pworker; let done = false;
+        const t = setTimeout(() => { if (done) return; done = true; w.terminate(); pworker = null; pspawn(); resolve({ ok: false, error: 'الكود أخد وقت طويل (أكتر من 6 ثواني). غالبا فيه loop مش بتخلص.' }); }, 6000);
+        const f = (e) => { if (!e.data || e.data.id !== id || done) return; done = true; clearTimeout(t); w.removeEventListener('message', f); resolve(e.data.res); };
+        w.addEventListener('message', f);
+        w.postMessage({ id, code, kind, stdin: '', items: items || [] });
+      });
+    });
+    pchain = p.catch(() => {}); return p;
+  }
+  const normText = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const anyLine = (stdout, pred) => { const lines = String(stdout || '').split('\n'); return lines.some((l) => pred(normText(l))) || pred(normText(stdout)); };
+  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const codePre = (txt) => h('pre', { dir: 'ltr', style: 'background:#0b101a;padding:10px;border-radius:10px;white-space:pre-wrap' }, txt);
+
+  function caseProgressText(cfg) {
+    const st = caseLoad(cfg.key);
+    const c = cfg.stages.filter((s) => st['s' + s.n]).length;
+    if (c === cfg.stages.length) return 'اتحلت ' + stars(st.stars || 1);
+    return c + '/' + cfg.stages.length + ' مراحل';
+  }
+
+  function caseFinal(cfg) {
+    const st = caseLoad(cfg.key);
+    const s = (st.wrongs || 0) === 0 && (st.hints || 0) <= 1 ? 3 : (st.wrongs || 0) <= 3 && (st.hints || 0) <= 4 ? 2 : 1;
+    const prev = caseLoad(cfg.key).stars || 0; caseSave(cfg.key, { stars: Math.max(prev, s), solvedAll: true });
+    $app.replaceChildren(
+      h('div', { class: 'big' }, cfg.icon),
+      h('h2', { class: 'center' }, cfg.finalTitle),
+      h('div', { class: 'big stars' }, stars(s)),
+      h('div', { class: 'card' }, ...cfg.finalBody),
+      h('div', { class: 'center' }, h('button', { class: 'btn', onclick: () => (location.hash = '#/challenges') }, 'رجوع للتحديات')));
+  }
+
+  function caseStageView(cfg, stage) {
+    const st = caseLoad(cfg.key);
+    const solved = !!st['s' + stage.n];
+    let hintsUsed = 0;
+    const out = h('div');
+    const ta = h('textarea', { spellcheck: 'false', dir: 'ltr', style: 'min-height:140px' }, (st.code && st.code[stage.n]) || stage.starter);
+    ta.addEventListener('input', () => { const cur = caseLoad(cfg.key); cur.code = cur.code || {}; cur.code[stage.n] = ta.value; localStorage.setItem(cfg.key, JSON.stringify(cur)); });
+    const hintBox = h('div');
+    const hintBtn = h('button', { class: 'btn ghost' }, '💡 تلميح (بيقلل النجوم)');
+    hintBtn.addEventListener('click', () => {
+      if (hintsUsed >= stage.hints.length) return;
+      hintBox.append(h('div', { class: 'fb clue' }, '💡 ' + (hintsUsed + 1) + '/' + stage.hints.length + ': ' + stage.hints[hintsUsed]));
+      hintsUsed++;
+      const cur = caseLoad(cfg.key); caseSave(cfg.key, { hints: (cur.hints || 0) + 1 });
+      if (hintsUsed >= stage.hints.length) hintBtn.remove();
+    });
+    const keyBox = h('div');
+    const run = h('button', { class: 'btn' }, '▶ نفذ وتحقق');
+    const bumpWrongs = () => { const cur = caseLoad(cfg.key); caseSave(cfg.key, { wrongs: (cur.wrongs || 0) + 1 }); };
+    const markSolved = () => { const cur = caseLoad(cfg.key); cur['s' + stage.n] = true; localStorage.setItem(cfg.key, JSON.stringify(cur)); };
+    const showSolved = () => {
+      out.replaceChildren(h('div', { class: 'fb clue' }, '✅ ' + stage.done));
+      if (stage.n < cfg.stages.length) {
+        out.append(h('div', { class: 'center', style: 'margin-top:10px' }, h('button', { class: 'btn', onclick: () => renderCaseStage(cfg, stage.n + 1) }, 'المرحلة اللي بعدها ⬅')));
+      } else {
+        caseSave(cfg.key, { solvedAll: true });
+        setTimeout(() => caseFinal(cfg), 1200);
+      }
+    };
+    const showEntry = (parts) => {
+      keyBox.replaceChildren(
+        h('h3', null, stage.entry.title),
+        h('div', { class: 'row' },
+          h('input', { type: 'text', placeholder: stage.entry.placeholder, dir: 'ltr', style: 'padding:10px;border-radius:10px;border:1px solid #2d3a57;background:#0b101a;color:inherit;width:170px' }),
+          h('button', { class: 'btn', onclick: (ev) => {
+            const inp = ev.target.previousSibling;
+            if (stage.entry.check(inp.value)) { const cur = caseLoad(cfg.key); cur['k' + stage.n] = true; localStorage.setItem(cfg.key, JSON.stringify(cur)); markSolved(); keyBox.replaceChildren(); showSolved(); }
+            else { bumpWrongs(); keyBox.append(h('div', { class: 'fb bad' }, '❌ ' + stage.entry.wrongMsg)); }
+          } }, 'تأكيد')));
+      out.replaceChildren(...parts);
+    };
+    run.addEventListener('click', async () => {
+      const code = ta.value;
+      if (!code.trim()) { out.replaceChildren(h('div', { class: 'fb bad' }, '⚠️ اكتب الكود الأول.')); return; }
+      if (code.length > 20000) { out.replaceChildren(h('div', { class: 'fb bad' }, '⚠️ الكود طويل زيادة.')); return; }
+      run.disabled = true; out.replaceChildren(h('p', { class: 'muted' }, 'بيتم التنفيذ... (أول مرة بتحمل بيئة Python، ممكن ثواني)'));
+      let r;
+      if (stage.mode === 'call') r = await runPy(code, 'call', stage.tests.map((t) => ({ expr: t.expr })));
+      else r = await runPy((stage.data != null ? 'DATA = ' + JSON.stringify(stage.data) + '\n' : '') + code, 'io', []);
+      run.disabled = false;
+      if (!r || !r.ok) {
+        bumpWrongs();
+        return out.replaceChildren(h('div', { class: 'fb bad' }, '⚠️ ' + ((r && r.error) || 'حصلت مشكلة في التنفيذ.')));
+      }
+      const parts = [];
+      if (r.stdout && r.stdout.trim()) parts.push(codePre(r.stdout));
+      if (stage.mode === 'io') {
+        if (!stage.ioCheck(r.stdout)) {
+          bumpWrongs();
+          parts.push(h('div', { class: 'fb bad' }, '❌ ' + stage.ioFail));
+          return out.replaceChildren(...parts);
+        }
+        if (stage.entry && !caseLoad(cfg.key)['k' + stage.n]) {
+          parts.push(h('div', { class: 'fb clue' }, '✅ الشفرة اتفكت صح! باقي خطوة واحدة:'));
+          return showEntry(parts);
+        }
+        markSolved(); return showSolved();
+      }
+      // call mode
+      let passed = 0;
+      for (let i = 0; i < stage.tests.length; i++) {
+        const t = stage.tests[i], got = r.results && r.results[i];
+        if (got && got.ok && eq(got.v, t.expect)) passed++;
+        else {
+          bumpWrongs();
+          parts.push(h('div', { class: 'fb bad' },
+            '❌ نجح ' + passed + ' من ' + stage.tests.length + '. الحالة اللي فشلت:',
+            codePre('المدخل: ' + t.expr + '\nالمتوقع: ' + JSON.stringify(t.expect) + '\nاللي طلع: ' + (got && got.ok ? JSON.stringify(got.v) : 'Error: ' + (got && got.e)))));
+          return out.replaceChildren(...parts);
+        }
+      }
+      if (stage.entry && !caseLoad(cfg.key)['k' + stage.n]) {
+        parts.push(h('div', { class: 'fb clue' }, '✅ الدالة شغالة على كل الحالات! باقي خطوة واحدة:'));
+        return showEntry(parts);
+      }
+      markSolved(); showSolved();
+    });
+    return [
+      h('button', { class: 'btn ghost', onclick: () => renderCaseHome(cfg) }, '→ رجوع للقضية'),
+      h('h3', null, stage.icon + ' المرحلة ' + stage.n + ' من ' + cfg.stages.length + ': ' + stage.title + (solved ? ' ✅' : '')),
+      h('div', { class: 'card' }, h('p', { style: 'line-height:1.9' }, stage.story)),
+      h('details', { open: true }, h('summary', null, '📖 الشرح'), h('div', { class: 'card' }, stage.teach.map((line) => line.startsWith('CODE:') ? codePre(line.slice(5)) : h('p', { style: 'line-height:1.9' }, line)))),
+      h('div', { class: 'card' }, h('p', { style: 'line-height:1.9' }, '🎯 ' + stage.task)),
+      ta,
+      h('div', { class: 'row', style: 'margin:8px 0' }, run, hintBtn),
+      out, keyBox, hintBox,
+    ];
+  }
+
+  function renderCaseStage(cfg, n) {
+    $app.replaceChildren(...caseStageView(cfg, cfg.stages[n - 1]).flat()); window.scrollTo(0, 0);
+  }
+
+  function renderCaseHome(cfg) {
+    $app.replaceChildren(...caseView(cfg).flat()); window.scrollTo(0, 0);
+  }
+
+  function caseView(cfg) {
+    if (!pworker) pspawn();
+    const st = caseLoad(cfg.key);
+    const rows = cfg.stages.map((s, i) => {
+      const done = !!st['s' + s.n];
+      const open = done || i === 0 || !!st['s' + (s.n - 1)];
+      return h('div', { class: 'node' + (open ? '' : ' locked'), onclick: () => { if (open) renderCaseStage(cfg, s.n); } },
+        h('div', { class: 'num' }, done ? '✅' : open ? String(s.n) : '🔒'),
+        h('div', { style: 'flex:1' }, h('b', null, s.icon + ' ' + s.title), h('div', { class: 'muted' }, done ? 'اتحلت' : open ? 'متاحة' : 'اقفل اللي قبلها الأول')));
+    });
+    return [
+      h('button', { class: 'btn ghost', onclick: () => (location.hash = '#/challenges') }, '→ رجوع'),
+      h('h2', null, cfg.icon + ' ' + cfg.title),
+      h('div', { class: 'card' }, cfg.intro.map((p, i) => h('p', { class: i === cfg.intro.length - 1 ? 'muted' : '', style: 'line-height:1.9' }, p))),
+      h('p', { class: 'muted' }, caseProgressText(cfg)),
+      h('div', { class: 'path', style: '--c:' + cfg.color }, rows),
+    ];
+  }
+
+  // ================= Case 1: فك الشفرة =================
+  const CIPHER_CFG = {
+    key: 'sq-challenge-cipher', icon: '🔐', color: '#3572A5',
+    title: 'فك الشفرة: الخلية النائمة',
+    intro: [
+      'المخابرات اعترضت 6 رسايل متبادلة بين خلية نائمة. كل رسالة متشفرة بطريقة أصعب من اللي قبلها، وكل رسالة بتفكها بتقربك من كلمة سر المخبأ.',
+      '🎯 مفيش اختيارات ولا جداول جاهزة: إنت اللي هتكتب كود Python يفك كل شفرة بنفسك. كل مرحلة فيها شرحها الأول، وبعدين التنفيذ عليك.',
+      'الكود بيتنفذ في المتصفح بتاعك (Pyodide). أول تشغيل ممكن ياخد ثواني وهو بيحمل بيئة Python.',
+    ],
+    finalTitle: 'فككت الشفرة وقفلت القضية! 🎉',
+    finalBody: [
+      h('p', { style: 'line-height:1.9' }, '📋 اللي استخدمته عشان توصل لكلمة سر المخبأ:'),
+      h('div', { style: 'line-height:1.9' },
+        h('p', null, '1) شفرة قيصر: الإزاحة الثابتة بالـ ord و chr وباقي القسمة.'),
+        h('p', null, '2) الكسر بالقوة الغاشمة: 25 احتمال بس، جربهم كلهم.'),
+        h('p', null, '3) تحليل التكرار: أكتر حرف في الإنجليزي هو e، ومنه المفتاح.'),
+        h('p', null, '4) Vigenère: مفتاح كلمة بيتلف على النص.'),
+        h('p', null, '5) فك الطبقات: رسالة جوه رسالة، والترتيب الصح هو الحل.')),
+    ],
+    stages: [
+      {
+        n: 1, icon: '🅰️', title: 'شفرة قيصر',
+        story: 'أول رسالة اعترضناها من الخلية: "khoor zruog". شكلها شفرة قديمة معروفة: شفرة قيصر، كل حرف متزاح عدد ثابت من الخانات في الأبجدية.',
+        teach: [
+          'قيصر بمفتاح 3 يعني: a تبقى d، و b تبقى e، وهكذا. الفك هو العكس: ارجع بكل حرف 3 خانات ورا.',
+          'في Python: الدالة ord(h) بتديك رقم الحرف، و chr(n) بترجع الحرف من رقمه. مثال: ord("a") بـ 97.',
+          'CODE:out = chr((ord(ch) - 97 - key) % 26 + 97)',
+          'باقي القسمة % 26 بيخلي الأبجدية تلف: a لو رجعت خانة واحدة ورا توصل z.',
+          'الحروف هنا small بس. أي حاجة مش حرف (مسافة، نقطة، رقم) تفضل زي ما هي من غير ما تتغير.',
+        ],
+        task: 'اكتب دالة caesar_decrypt(cipher, key) بترجع (return) النص المفكوك. هنختبرها على رسايل مختلفة وبمفاتيح مختلفة.',
+        mode: 'call',
+        starter: 'def caesar_decrypt(cipher, key):\n    # اكتب كودك هنا\n',
+        tests: [{"expr": "caesar_decrypt(\"khoor zruog\", 3)", "expect": "hello world"}, {"expr": "caesar_decrypt(\"phhw dw wkh eulgjh dw gdzq\", 3)", "expect": "meet at the bridge at dawn"}, {"expr": "caesar_decrypt(\"fdhvdu lv hdvb\", 3)", "expect": "caesar is easy"}, {"expr": "caesar_decrypt(\"aol hnlua slma aol jpaf\", 7)", "expect": "the agent left the city"}],
+        hints: [
+          'المطلوب return مش print. امشي على النص حرف حرف: لو الحرف بين "a" و "z" طبق المعادلة اللي في الشرح، ولو لأ سيبه زي ما هو.',
+          'آخر تلميح حقيقي: جوه الدالة اعمل out فاضي، ولكل ch في cipher: لو "a" <= ch <= "z" ضيف chr((ord(ch) - 97 - key) % 26 + 97)، غير كده ضيف ch زي ما هو. في الآخر return out.',
+        ],
+        done: 'اتفكت! "meet at the bridge at dawn" — الخلية بتحدد معاد. وصلت رسالة تانية.',
+      },
+      {
+        n: 2, icon: '🔨', title: 'كسر قيصر من غير مفتاح',
+        story: 'الرسالة التانية: "esp xppetyr xzgpo ez esp zwo azce le xtoytrse". قيصر برضه، بس المرة دي المفتاح مش معانا.',
+        teach: [
+          'مفيش غير 25 مفتاح ممكن في قيصر. القوة الغاشمة (brute force) هنا حلال: جربهم كلهم وبص على النتايج.',
+          'اكتب دالة crack(cipher) بترجع list فيها 25 نص: الأول مفكوك بمفتاح 1، التاني بمفتاح 2، لحد 25.',
+          'تقدر تعيد استخدام فكرة caesar_decrypt جواها (انسخ الدالة ونادِها)، أو تكتب كل حاجة من الأول.',
+          'خلي crack تطبع كل احتمال في سطر كمان (print) عشان تشوفهم في النتايج. سطر واحد بس هيبقى كلام مفهوم، ورقمه هو المفتاح.',
+        ],
+        task: 'اكتب crack(cipher) بترجع قائمة الـ 25 احتمال بالترتيب وتطبعهم، وبعدين اكتب المفتاح اللي طلعلك في الخانة اللي تحت النتايج.',
+        mode: 'call',
+        starter: 'def crack(cipher):\n    # ارجع list من 25 نص (مفاتيح 1 لـ 25) واطبعهم\n',
+        tests: [{ expr: 'crack("esp xppetyr xzgpo ez esp zwo azce le xtoytrse")', expect: ["dro woodsxq wyfon dy dro yvn zybd kd wsnxsqrd", "cqn vnncrwp vxenm cx cqn xum yxac jc vrmwrpqc", "bpm ummbqvo uwdml bw bpm wtl xwzb ib uqlvqopb", "aol tllapun tvclk av aol vsk wvya ha tpkupnoa", "znk skkzotm subkj zu znk urj vuxz gz sojtomnz", "ymj rjjynsl rtaji yt ymj tqi utwy fy rnisnlmy", "xli qiixmrk qszih xs xli sph tsvx ex qmhrmklx", "wkh phhwlqj pryhg wr wkh rog sruw dw plgqljkw", "vjg oggvkpi oqxgf vq vjg qnf rqtv cv okfpkijv", "uif nffujoh npwfe up uif pme qpsu bu njeojhiu", "the meeting moved to the old port at midnight", "sgd lddshmf lnudc sn sgd nkc onqs zs lhcmhfgs", "rfc kccrgle kmtcb rm rfc mjb nmpr yr kgblgefr", "qeb jbbqfkd jlsba ql qeb lia mloq xq jfakfdeq", "pda iaapejc ikraz pk pda khz lknp wp iezjecdp", "ocz hzzodib hjqzy oj ocz jgy kjmo vo hdyidbco", "nby gyyncha gipyx ni nby ifx jiln un gcxhcabn", "max fxxmbgz fhoxw mh max hew ihkm tm fbwgbzam", "lzw ewwlafy egnwv lg lzw gdv hgjl sl eavfayzl", "kyv dvvkzex dfmvu kf kyv fcu gfik rk dzuezxyk", "jxu cuujydw celut je jxu ebt fehj qj cytdywxj", "iwt bttixcv bdkts id iwt das edgi pi bxscxvwi", "hvs asshwbu acjsr hc hvs czr dcfh oh awrbwuvh", "gur zrrgvat zbirq gb gur byq cbeg ng zvqavtug", "ftq yqqfuzs yahqp fa ftq axp badf mf yupzustf"] }],
+        entry: {
+          title: '🔢 المفتاح كان كام؟', placeholder: 'رقم من 1 لـ 25',
+          check: (v) => parseInt(v, 10) === 11,
+          wrongMsg: 'مش هو. بص تاني على السطور: مين فيهم كلام مفهوم؟',
+        },
+        hints: [
+          'جوه الدالة اعمل قائمة فاضية، و loop على k من 1 لـ 25، ولكل k فك النص (نفس معادلة مرحلة 1) وضيف النتيجة للقائمة واطبعها. في الآخر return القائمة.',
+          'آخر تلميح حقيقي: لما تبص على الـ 25 سطر، هتلاقي سطر واحد مفهوم بيتكلم عن meeting. رقمه هو المفتاح (أكبر من 10).',
+        ],
+        done: 'المفتاح كان 11. "the meeting moved to the old port at midnight" — غيروا مكان المقابلة. الرسالة الجاية أطول.',
+      },
+      {
+        n: 3, icon: '📊', title: 'تحليل التكرار',
+        story: 'الرسالة التالتة طويلة، ومحتاجين نفكها بسرعة قبل ما الخلية تتحرك. هتقعد تجرب 25 مفتاح وتقراهم بعينك؟ فيه طريقة المحققين الأذكى.',
+        teach: [
+          'في أي نص إنجليزي طويل، أكتر حرف بيتكرار هو e. يعني في النص المشفر، أكتر حرف هيتكرار هو e بعد ما اتشفرت.',
+          'عد الحروف بـ Dictionary: لكل حرف في النص (بعد ما تعمله lower)، لو حرف من a لـ z زود عداده.',
+          'CODE:counts[ch] = counts.get(ch, 0) + 1',
+          'أكبر قيمة في الـ Dictionary هي الحرف الأكثر تكرارا: max(counts, key=counts.get).',
+          'المفتاح = المسافة بين الحرف ده و e: (ord(top) - ord("e")) % 26.',
+        ],
+        task: 'اكتب دالتين: most_common(text) بترجع أكتر حرف متكرر (حروف بس، small)، و guess_key(cipher) بترجع المفتاح المتوقع على أساس إن الأكثر تكرارا هو e.',
+        mode: 'call',
+        starter: 'def most_common(text):\n    # اكتب كودك هنا\n\ndef guess_key(cipher):\n    # اكتب كودك هنا\n',
+        tests: [
+          { expr: 'most_common("aol jlss dpss nhaoly ulhy aol ypcly dhylovbzl ilmvyl aol aopyk ilss. rllw aol johuuls jslhu huk dhpa mvy aol nyllu spnoa. aoyll tltilyz dpss tlla aol rllwly aolyl huk aolu slhcl ilmvyl zbuypzl.")', expect: 'l' },
+          { expr: 'guess_key("aol jlss dpss nhaoly ulhy aol ypcly dhylovbzl ilmvyl aol aopyk ilss. rllw aol johuuls jslhu huk dhpa mvy aol nyllu spnoa. aoyll tltilyz dpss tlla aol rllwly aolyl huk aolu slhcl ilmvyl zbuypzl.")', expect: 7 },
+        ],
+        hints: [
+          'most_common: اعمل counts فاضي، امشي على text.lower() حرف حرف، ومتعدش غير الحروف ("a" <= ch <= "z"). في الآخر max(counts, key=counts.get).',
+          'آخر تلميح حقيقي: guess_key سطر واحد: return (ord(most_common(cipher)) - ord("e")) % 26.',
+        ],
+        done: 'صح! المفتاح 7، وتحليل التكرار فك الرسالة كلها في لحظة. الخلية هتغير طريقتها...',
+      },
+      {
+        n: 4, icon: '🔑', title: 'شفرة Vigenère',
+        story: 'زي ما توقعنا: الخلية بطلت قيصر. الرسالة الرابعة متشفرة بـ Vigenère — مفتاح كلمة بدل رقم، وأصعب بكتير في الكسر.',
+        teach: [
+          'المفتاح كلمة، مثلا "key". كل حرف منها بيحدد إزاحة: k يعني 10، e يعني 4، y يعني 24.',
+          'الحرف الأول من النص يتزاح 10، التاني 4، التالت 24، الرابع يرجع لـ 10 تاني... الكلمة بتلف.',
+          'الفك هو العكس: اطرح الإزاحة من كل حرف. المعادلة نفس قيصر، بس k بتتغير مع كل حرف.',
+          'المسافات والعلامات تفضل زي ما هي، وما بتستهلكش حرف من المفتاح: المؤشر على الكلمة يتحرك بس لما تفك حرف حقيقي.',
+        ],
+        task: 'اكتب vigenere_decrypt(cipher, key) بترجع النص المفكوك. لو كتبتها صح، "lxfopv ef rnhr" بمفتاح "lemon" هتديك جملة مفهومة.',
+        mode: 'call',
+        starter: 'def vigenere_decrypt(cipher, key):\n    # اكتب كودك هنا\n',
+        tests: [{"expr": "vigenere_decrypt(\"lxfopv ef rnhr\", \"lemon\")", "expect": "attack at dawn"}, {"expr": "vigenere_decrypt(\"dlc oeevi fkw jkrboh\", \"key\")", "expect": "the eagle has landed"}, {"expr": "vigenere_decrypt(\"repv ar ft ejs fffp jchxe\", \"falcon\")", "expect": "meet me at the safe house"}],
+        hints: [
+          'محتاج مؤشر j يبدأ من 0. لكل حرف من النص: لو حرف، احسب k = ord(key[j % len(key)]) - 97، فك بيه، وحرك j خطوة. لو مش حرف، ضيفه وسيب j مكانه.',
+          'آخر تلميح حقيقي: الفك chr((ord(ch) - 97 - k) % 26 + 97) — نفس قيصر بالظبط، الفرق الوحيد إن k جاية من حرف المفتاح الحالي.',
+        ],
+        done: 'Vigenère اتكسر! الخلية حسّت إن فيه حد بيقرا — الخطاب الأخير منهم اتعقد.',
+      },
+      {
+        n: 5, icon: '📜', title: 'الخطاب الكبير',
+        story: 'اعترضنا خطاب كامل، صفحة كاملة متشفرة بقيصر بمفتاح مجهول. جواه تفاصيل العملية كلها، وأهم حاجة: الكلمة السرية للمظروف الأخير.',
+        teach: [
+          'النص المشفر جاهز في متغير اسمه DATA — استخدمه على طول في كودك (متعرفهوش بنفسك).',
+          'معاك سلاحين: تجرب المفاتيح الـ 25 زي مرحلة 2، أو تحليل التكرار من مرحلة 3. النص طويل، فالتكرار شغال ممتاز هنا.',
+          'بعد ما تفك، دوّر في النص على جملة "the key word is" — الكلمة اللي بعدها هي المطلوبة.',
+          'CODE:word = text.split("the key word is ")[1].split()[0]',
+        ],
+        task: 'اكتب كود يفك DATA ويطبع (print) الكلمة السرية بس في سطر لوحدها: كلمة واحدة، حروف small، من غير نقط أو مسافات.',
+        mode: 'io',
+        data: 'tzxgm litkkhp, max vxee bl fhobgz max vktmxl hg ykbwtr gbzam makhnza max hew ktbeptr. max zntkwl vatgzx tm xexoxg tgw max atkuhnk ztmx vhwx bl yhnk mph gbgx. dxxi max ktwbh lbexgm ngmbe max mabkw lbzgte. max dxr phkw bl ytevhg. unkg mabl exmmxk tymxk kxtwbgz.',
+        starter: '# المتغير DATA جاهز فيه الخطاب المشفر\n# فك الشفرة واطبع الكلمة السرية\n',
+        ioCheck: (out) => anyLine(out, (l) => l.replace(/[^a-z]/g, '') === 'falcon'),
+        ioFail: 'الكلمة اللي طلعت مش هي المطلوبة. اطبع الكلمة السرية بس في سطر لوحدها (small، من غير نقط أو مسافات).',
+        hints: [
+          'عد الحروف في DATA (small بس)، لقّي الأكثر تكرارا، احسب المفتاح من e زي مرحلة 3، وفك الخطاب كله.',
+          'آخر تلميح حقيقي: بعد الفك هتلاقي جملة فيها "the key word is ...". اطبع الكلمة اللي بعدها بس (split هيوصلك ليها).',
+        ],
+        done: 'الكلمة السرية: falcon. خزنها كويس — دي مفتاح المظروف الأخير.',
+      },
+      {
+        n: 6, icon: '🎯', title: 'المظروف الأخير',
+        story: 'المظروف الأخير من الخلية، ومتشفر بطبقتين فوق بعض: الأول شفرة قيصر، وفوقيها طبقة Vigenère بالكلمة السرية اللي طلعت من الخطاب. مفيش رسايل بعدها — دي النهاية.',
+        teach: [
+          'النص المشفر جاهز في متغير اسمه DATA.',
+          'الترتيب مهم: فك Vigenère الأول بمفتاح "falcon" (الكلمة اللي طلعت من مرحلة 5). الناتج لسه مشفر — دي طبقة قيصر.',
+          'بعدها اكسر قيصر زي ما عملت في مرحلة 2 أو 3، ودوّر على الجملة اللي فيها "password is".',
+        ],
+        task: 'اكتب كود يفك الطبقتين بالترتيب ويطبع كلمة سر المخبأ في سطر لوحدها: كلمة واحدة، small، من غير نقط.',
+        mode: 'io',
+        data: 'sqgkh jelxb. pcr atpacbclo lvfapyny va irkzaqq. bakrim, ddz cilcsjel bc lcbmgst.',
+        starter: '# المتغير DATA جاهز فيه الرسالة المشفرة بطبقتين\n# 1) فك Vigenère بالكلمة من مرحلة 5   2) اكسر قيصر   3) اطبع كلمة السر\n',
+        ioCheck: (out) => anyLine(out, (l) => l.replace(/[^a-z]/g, '') === 'phoenix'),
+        ioFail: 'لسه مش هي. فك Vigenère الأول، وبعدين اكسر قيصر، واطبع الكلمة اللي بعد "password is" في سطر لوحدها.',
+        hints: [
+          'الخطوة الأولى vigenere_decrypt(DATA, "falcon") — لو كتبت الدالة في مرحلة 4 انسخها هنا. الناتج هيبقى شكله مقلقل، ده طبيعي: لسه طبقة قيصر.',
+          'آخر تلميح حقيقي: جرب على ناتج Vigenère كل المفاتيح من 1 لـ 25، ودوّر على نص فيه "password is" — الكلمة اللي بعدها هي المطلوبة، اطبعها من غير النقطة.',
+        ],
+        done: '',
+      },
+    ],
+  };
+
+  // ================= Case 2: غرفة العمليات =================
+  const WAR_CFG = {
+    key: 'sq-challenge-warroom', icon: '🎖️', color: '#7d3c98',
+    title: 'غرفة العمليات: الحرب السرية',
+    intro: [
+      'إنت ضابط الشفرة في حزب "الدرع"، وفي حرب خفية بينك وبين 3 أحزاب: الذئاب (wolves)، العقارب (scorpions)، والصقور (falcons). واحد فيهم بيحضر هجوم عليكم.',
+      'غرفة العمليات بتبعتلك رسايل مشفرة وإنت بترد عليها مشفر. وفي نفس الوقت بترصد ترددات العدو وتحاول تفك رسايلهم.',
+      '🎯 مهمتك النهائية: قبل الفجر، لازم تكون عرفت مين اللي هيهجم، وإمتى، ومنين، وبأسلحة إيه — وتبعت تقرير مشفر للقاعدة عشان تجهزلك الدفاع والتعزيزات.',
+      'نصيحة: تحدي "فك الشفرة" بيعلّم نفس الأدوات خطوة بخطوة. هنا المعركة الحقيقية: هتفك شفرات العدو وترمّز (encrypt) رسايلك كمان.',
+    ],
+    finalTitle: 'التقرير وصل والقاعدة ردت! 🎖️',
+    finalBody: [
+      h('p', { style: 'line-height:1.9' }, '📡 رد غرفة العمليات: "أحسنت يا ضابط. التعزيزات في الطريق: 200 جندي ومدفعية مضادة على التلة الشرقية، ودعم جوي يوصل قبل الفجر. الهجوم هيتكسر قبل ما يبدأ."'),
+      h('p', { style: 'line-height:1.9' }, '📋 اللي عملته في المهمة:'),
+      h('div', { style: 'line-height:1.9' },
+        h('p', null, '1) فكيت رسايل القاعدة (قيصر بمفتاح معروف).'),
+        h('p', null, '2) رمّزت ردودك للقاعدة (caesar encrypt).'),
+        h('p', null, '3) كسرت أول اعتراض بالقوة الغاشمة (الوقت: الجمعة الفجر).'),
+        h('p', null, '4) كسرت التاني بتحليل التكرار (الأسلحة والمكان).'),
+        h('p', null, '5) فكيت خطة العدو بـ Vigenère (الحزب المهاجم).'),
+        h('p', null, '6) رمّزت التقرير النهائي وبعته للقاعدة.')),
+    ],
+    stages: [
+      {
+        n: 1, icon: '📡', title: 'رسالة القاعدة',
+        story: 'أول رسالة من غرفة العمليات وصلت مشفرة. شيفرة القاعدة معروفة ليك: قيصر بمفتاح 5.',
+        teach: [
+          'قيصر: كل حرف متزاح عدد ثابت. القاعدة بتستخدم مفتاح 5: a تبقى f.',
+          'الفك هو العكس: ارجع بكل حرف 5 خانات. الدالة ord(h) بتديك رقم الحرف، و chr(n) بترجع الحرف من رقمه.',
+          'CODE:out = chr((ord(ch) - 97 - key) % 26 + 97)',
+          'غير الحروف (مسافات وعلامات) تفضل زي ما هي.',
+        ],
+        task: 'اكتب caesar_decrypt(cipher, key) بترجع (return) النص المفكوك. أول اختبار هو رسالة القاعدة نفسها.',
+        mode: 'call',
+        starter: 'def caesar_decrypt(cipher, key):\n    # اكتب كودك هنا\n',
+        tests: [{"expr": "caesar_decrypt(\"fljsy kfqhts, bj nsyjwhjuyji jsjrd ywfkknh. gwjfp ymjnw htijx fsi wjutwy gjktwj kwnifd.\", 5)", "expect": "agent falcon, we intercepted enemy traffic. break their codes and report before friday."}, {"expr": "caesar_decrypt(\"mtqi dtzw utxnynts\", 5)", "expect": "hold your position"}, {"expr": "caesar_decrypt(\"ajmrx brunwln dwcru mjfw\", 9)", "expect": "radio silence until dawn"}],
+        hints: [
+          'المطلوب return مش print. امشي على النص حرف حرف: لو الحرف بين "a" و "z" طبق معادلة الشرح، ولو لأ سيبه زي ما هو.',
+          'آخر تلميح حقيقي: لكل ch في cipher: لو "a" <= ch <= "z" ضيف chr((ord(ch) - 97 - key) % 26 + 97)، غير كده ضيف ch. وفي الآخر return.',
+        ],
+        done: 'رسالة القاعدة: "agent falcon, we intercepted enemy traffic. break their codes and report before friday." — القاعدة مستنية تأكيد الاستلام.',
+      },
+      {
+        n: 2, icon: '📤', title: 'رد مشفر',
+        story: 'القاعدة بعتت تعليمات تانية: "لما توصلك الرسالة دي، أكد الاستلام بنفس الشيفرة". المرة دي إنت اللي هترمّز، مش بس تفك.',
+        teach: [
+          'التشفير عكس الفك بالظبط: بدل ما تطرح المفتاح، اجمعه.',
+          'CODE:out = chr((ord(ch) - 97 + key) % 26 + 97)',
+          'لو فهمت caesar_decrypt، دي نفسها بس بإشارة + بدل −.',
+        ],
+        task: 'اكتب caesar_encrypt(plain, key) بترجع النص المرمز. القاعدة هتختبرك على 3 رسايل قبل ما تبعت حقيقي.',
+        mode: 'call',
+        starter: 'def caesar_encrypt(plain, key):\n    # اكتب كودك هنا\n',
+        tests: [{"expr": "caesar_encrypt(\"report ready\", 5)", "expect": "wjutwy wjfid"}, {"expr": "caesar_encrypt(\"the base is safe\", 3)", "expect": "wkh edvh lv vdih"}, {"expr": "caesar_encrypt(\"attack confirmed\", 5)", "expect": "fyyfhp htsknwrji"}],
+        hints: [
+          'خد caesar_decrypt بتاعتك وغير إشارة واحدة: + key بدل − key.',
+          'آخر تلميح حقيقي: chr((ord(ch) - 97 + key) % 26 + 97) لكل حرف، وغير الحروف زي ما هو.',
+        ],
+        done: 'التأكيد اتبعت مشفر ✅ القاعدة ردت: "ابدأ الرصد. أي رسالة عدو تفكها، بلّغنا فورا."',
+      },
+      {
+        n: 3, icon: '🕵️', title: 'أول اعتراض',
+        story: 'الراديو سجل تردد غريب: رسالة قصيرة من العدو، قيصر بس بمفتاح مجهول: "sevqnl ng qnja jr zbir. jnvg sbe gur fvtany."',
+        teach: [
+          'المفتاح واحد من 25 بس. جربهم كلهم: فك النص بكل مفتاح من 1 لـ 25 واطبع كل محاولة في سطر.',
+          'سطر واحد بس هيطلع كلام مفهوم. اقراه كويس — دي أول معلومة عن الهجوم.',
+        ],
+        task: 'اكتب كود يكسر الرسالة واطبع النص المفكوك الصحيح (السطر المفهوم). المعلومة اللي فيها هتحتاجها في التقرير النهائي.',
+        mode: 'io',
+        starter: '# الرسالة المعترضة:\nmsg = "sevqnl ng qnja jr zbir. jnvg sbe gur fvtany."\n# اكسرها واطبع النص الصح\n',
+        ioCheck: (out) => anyLine(out, (l) => l === normText('friday at dawn we move. wait for the signal.')),
+        ioFail: 'لسه مش هي. اطبع السطر المفهوم بس بعد ما تكسر الشفرة.',
+        hints: [
+          'اعمل دالة فك قيصر (زي مرحلة 1) و loop على k من 1 لـ 25 واطبع: print(k, dec(msg, k)) — وبص على السطور.',
+          'آخر تلميح حقيقي: السطر المفهوم بيبدأ بـ friday. المفتاح بين 10 و 20.',
+        ],
+        done: '"friday at dawn we move. wait for the signal." — الهجوم الجمعة الفجر. بس مين؟ وبإيه؟ كمل رصد.',
+      },
+      {
+        n: 4, icon: '🔥', title: 'ثاني اعتراض',
+        story: 'رسالة أطول من نفس التردد، والمفتاح اتغير. تجربة الـ 25 مفتاح بعينك هتضيع وقت — والهجوم قرب.',
+        teach: [
+          'النصوص الطويلة ليها نقطة ضعف: التكرار. في الإنجليزي أكتر حرف بيتكرار هو e.',
+          'عد الحروف بـ Dictionary، وأكتر حرف في النص المشفر هو e بعد التشفير. المفتاح = (ord(top) - ord("e")) % 26.',
+          'CODE:counts[ch] = counts.get(ch, 0) + 1',
+        ],
+        task: 'النص جاهز في متغير DATA. اكسره بتحليل التكرار (أو أي طريقة) واطبع الرسالة المفكوكة كاملة. فيها الأسلحة ومكان الهجوم.',
+        mode: 'io',
+        data: 'cqn jacruunah jwm cqn axltncb jan anjmh. cqn bcartn fruu lxvn oaxv cqn njbcnaw qruu. tnny cqn ajmrxb brunwc dwcru cqn ujbc vxvnwc. cnuu wx xwn xdcbrmn cqn lnuu.',
+        starter: '# المتغير DATA جاهز فيه الرسالة المعترضة\n# اكسرها واطبع النص المفكوك\n',
+        ioCheck: (out) => anyLine(out, (l) => l === normText('the artillery and the rockets are ready. the strike will come from the eastern hill. keep the radios silent until the last moment. tell no one outside the cell.')),
+        ioFail: 'لسه مش هي. اطبع الرسالة المفكوكة كاملة في سطر واحد.',
+        hints: [
+          'عد الحروف في DATA.lower() (الحروف بس)، لقّي الأكثر تكرارا، والمفتاح = (ord(top) - ord("e")) % 26. بعدها فك بيه.',
+          'آخر تلميح حقيقي: top = max(counts, key=counts.get)، وبعد الفك هتلاقي جملة عن artillery و rockets.',
+        ],
+        done: '"the artillery and the rockets are ready. the strike will come from the eastern hill." — مدفعية وصواريخ من التلة الشرقية. فضل نعرف مين.',
+      },
+      {
+        n: 5, icon: '🔑', title: 'خطة العدو الكبيرة',
+        story: 'أهم اعتراض لحد دلوقتي: العدو بعت خطته الكبيرة بشفرة Vigenère. وجاسوسنا جواهم بعت معلومة خطيرة: المفتاح هو اسم الحزب اللي قائد الهجوم — بس محدش يعرف مين فيهم.',
+        teach: [
+          'Vigenère: المفتاح كلمة، كل حرف منها إزاحة، والكلمة بتلف على النص. المسافات والعلامات متستهلكش حرف من المفتاح.',
+          'عندك 3 مرشحين بس للمفتاح: wolves و scorpions و falcons. جربهم التلاتة — مفتاح واحد بس هيطلع كلام مفهوم.',
+          'اللي هيتفك صح هو الحزب المهاجم.',
+        ],
+        task: 'النص في DATA. اكتب vigenere_decrypt(cipher, key) وجرّب أسماء الأحزاب التلاتة، واطبع الخطة المفكوكة. وبعدين جاوب في الخانة: مين الحزب اللي هيهجم؟',
+        mode: 'io',
+        data: 'kecieqcak okzc amoq lzg ojhiiyl. oqzmta oav xcztdvg flsa pvwqbq. ydqfp iw huw kecieqcak.',
+        starter: '# المتغير DATA جاهز فيه خطة العدو المشفرة\ndef vigenere_decrypt(cipher, key):\n    # اكتب كودك هنا\n\n# جرب: wolves / scorpions / falcons واطبع النتايج\n',
+        ioCheck: (out) => anyLine(out, (l) => l.includes('scorpions will lead the assault')),
+        ioFail: 'لسه ما اتفكتش. جرب أسماء الأحزاب التلاتة كمفتاح واطبع النص اللي يطلع مفهوم.',
+        entry: {
+          title: '⚔️ مين الحزب اللي هيهجم؟', placeholder: 'اسم الحزب بالإنجليزي',
+          check: (v) => ['scorpions', 'العقارب'].includes(String(v || '').trim().toLowerCase()),
+          wrongMsg: 'لأ. بص على النص اللي اتفك صح: مين اللي هيقود الهجوم؟',
+        },
+        hints: [
+          'انسخ vigenere_decrypt (أو اكتبها من الشرح) وبعدين: print(vigenere_decrypt(DATA, "wolves")) — وكرر مع scorpions و falcons.',
+          'آخر تلميح حقيقي: الحزب الصح هو اللي الخطة بتمدحه في آخرها (glory to the ...).',
+        ],
+        done: '"scorpions will lead the assault..." — العقارب هم المهاجمين. اكتملت المعلومات: مين، إمتى، منين، وبإيه. ابعت التقرير!',
+      },
+      {
+        n: 6, icon: '📨', title: 'التقرير النهائي',
+        story: 'الفجر قرب. القاعدة مستنية تقريرك: مين، إمتى، منين، وبأسلحة إيه. والتقرير لازم يتبعت مشفر بـ Vigenère بمفتاح القاعدة السري للرسايل المهمة: "shield".',
+        teach: [
+          'جمع المعلومات اللي طلعتها من الاعتراضات في جملة واحدة بالصيغة دي بالظبط (حروف small):',
+          'CODE:<party> attack <day> at <time> from the <place> with <weapons>',
+          'مثال بمعلومات وهمية: "wolves attack monday at noon from the north gate with tanks"',
+          'Vigenère encrypt عكس decrypt بالظبط: اجمع الإزاحة بدل ما تطرحها.',
+        ],
+        task: 'اكتب vigenere_encrypt(plain, key)، كوّن التقرير بالمعلومات الصح اللي جمعتها، واطبع النص المشفر. القاعدة هتفكه عندهم — لو حرف غلط، التعزيزات هتروح غلط.',
+        mode: 'io',
+        starter: 'def vigenere_encrypt(plain, key):\n    # اكتب كودك هنا\n\nreport = ""  # التقرير بالصيغة المطلوبة\n# اطبع النص المشفر\n',
+        ioCheck: (out) => anyLine(out, (l) => l === normText('kjwvalgua eewsjs jclvhg ee gsdv jcre api pdkamvy kast atwz hzxtodlzc lqv ywgvhlz')),
+        ioFail: 'التشفير مش مظبوط أو التقرير ناقص. تأكد من الصيغة بالظبط، وإن encrypt بتجمع الإزاحة مش بتطرحها.',
+        hints: [
+          'vigenere_encrypt نفس decrypt بإشارة +: chr((ord(ch) - 97 + k) % 26 + 97)، والمؤشر على المفتاح يتحرك على الحروف بس.',
+          'آخر تلميح حقيقي: التقرير هو: scorpions attack friday at dawn from the eastern hill with artillery and rockets — شفّره بمفتاح shield واطبع الناتج.',
+        ],
+        done: '',
+      },
+    ],
+  };
+
   window.CHALLENGES = {
-    route(sub) { $app.replaceChildren(...(sub === 'detective' ? view() : list()).flat()); window.scrollTo(0, 0); },
-    card() { const st = load(); return h('div', { class: 'card world', style: '--c:#c0392b', onclick: () => (location.hash = '#/challenges') }, h('div', { class: 'icon' }, '🧩'), h('div', null, h('h3', null, 'مرحلة التحديات العملية'), h('div', { class: 'muted' }, 'قضايا وتحديات كبيرة بتحلل فيها وتربط بنفسك'), h('div', { class: 'muted' }, st.solved ? '1/1 اتحل' : '0/1 اتحل'))); },
+    route(sub) { $app.replaceChildren(...(sub === 'detective' ? view() : sub === 'cipher' ? caseView(CIPHER_CFG) : sub === 'warroom' ? caseView(WAR_CFG) : list()).flat()); window.scrollTo(0, 0); },
+    card() { const st = load(); return h('div', { class: 'card world', style: '--c:#c0392b', onclick: () => (location.hash = '#/challenges') }, h('div', { class: 'icon' }, '🧩'), h('div', null, h('h3', null, 'مرحلة التحديات العملية'), h('div', { class: 'muted' }, 'قضايا وتحديات كبيرة بتحلل فيها وتربط بنفسك'), h('div', { class: 'muted' }, (() => { const n = (st.solved ? 1 : 0) + (caseLoad('sq-challenge-cipher').solvedAll ? 1 : 0) + (caseLoad('sq-challenge-warroom').solvedAll ? 1 : 0); return n + '/3 اتحل'; })()))); },
   };
 })();
